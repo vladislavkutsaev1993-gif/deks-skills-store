@@ -1,0 +1,22 @@
+[
+  {
+    "id": "test_skill",
+    "name": "ТЕСТ",
+    "description": "Тестовый навык магазина. Подбросить монетку и получить случайный ответ да/нет.",
+    "version": "1.0",
+    "author": "DEKS",
+    "preview_commands": ["подбрось монетку", "да или нет"],
+    "file": "test_skill.py",
+    "download_url": "https://raw.githubusercontent.com/vladislavkutsaev1993-gif/deks-skills-store/main/skills/test_skill.py",
+    "triggers": {
+      "монетка": {
+        "label": "Подбросить монетку",
+        "triggers": ["подбрось монетку", "монетка", "орёл или решка"]
+      },
+      "да_нет": {
+        "label": "Случайный ответ да/нет",
+        "triggers": ["да или нет", "скажи да или нет", "ответь да или нет"]
+      }
+    }
+  }
+]
