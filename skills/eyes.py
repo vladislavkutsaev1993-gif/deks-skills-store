@@ -57,6 +57,24 @@ class EyesSkill(BaseSkill):
         self._context_active = False
         self._lock = threading.Lock()
 
+    # ── Настройки (интерфейс BaseSkill) ──────────────────────────────────────
+
+    def get_settings(self) -> list:
+        return [
+            {
+                "key": "api_key",
+                "label": "Groq API ключ",
+                "placeholder": "gsk_...",
+                "secret": True
+            }
+        ]
+
+    def load_setting(self, key: str, default: str = "") -> str:
+        return self._config.get(key, default)
+
+    def save_setting(self, key: str, value: str):
+        self.save_config({key: value})
+
     # ── Конфиг ────────────────────────────────────────────────────────────────
 
     def _config_path(self) -> Path:
