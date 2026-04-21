@@ -228,7 +228,7 @@ class EyesSkill(BaseSkill):
         }
 
         body = json.dumps(payload).encode("utf-8")
-        path = f"/v1beta/models/{model}:generateContent?key={api_key}"
+        path = f"/v1/models/{model}:generateContent?key={api_key}"
         conn = http.client.HTTPSConnection("generativelanguage.googleapis.com", timeout=20)
         conn.request("POST", path, body=body, headers={"Content-Type": "application/json"})
         resp = conn.getresponse()
