@@ -66,7 +66,7 @@ class EyesSkill(BaseSkill):
         self._lock = threading.Lock()
 
     # ── Настройки (интерфейс BaseSkill) ──────────────────────────────────────
-
+    
     def get_settings(self) -> list:
         return [
             {
@@ -78,14 +78,14 @@ class EyesSkill(BaseSkill):
         ]
 
     def get_data_files(self) -> list:
-    return ["eyes_config.json"]
-    
+        return ["eyes_config.json"]
+
     def load_setting(self, key: str, default: str = "") -> str:
         return self._config.get(key, default)
 
     def save_setting(self, key: str, value: str):
         self.save_config({key: value})
-
+        
     # ── Конфиг ────────────────────────────────────────────────────────────────
 
     def _config_path(self) -> Path:
