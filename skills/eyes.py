@@ -34,7 +34,7 @@ CONFIG_FILENAME = "eyes_config.json"
 
 DEFAULT_CONFIG = {
     "api_key": "",
-    "model": "gemini-2.0-flash",
+    "model": "gemini-1.5-flash",
 }
 
 VISION_PROMPT = (
