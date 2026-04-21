@@ -1,10 +1,10 @@
 """
 eyes.py — навык зрения DEKS.
-Анализирует экран через Vision AI (Groq / OpenAI-compatible).
+Анализирует экран через Vision AI (Google Gemini).
 Скриншот хранится только в RAM, на диск не пишется.
 
 Конфиг: DEKS_DATA/eyes_config.json
-Получить API ключ Groq бесплатно: https://console.groq.com/keys
+Получить API ключ бесплатно: https://aistudio.google.com
 """
 
 import json
@@ -34,8 +34,7 @@ CONFIG_FILENAME = "eyes_config.json"
 
 DEFAULT_CONFIG = {
     "api_key": "",
-    "model": "meta-llama/llama-4-scout-17b-16e-instruct",
-    "api_url": "https://api.groq.com/openai/v1/chat/completions"
+    "model": "gemini-2.0-flash",
 }
 
 VISION_PROMPT = (
@@ -61,14 +60,14 @@ class EyesSkill(BaseSkill):
         self._context_active = False
         self._lock = threading.Lock()
 
-    # ── Настройки (интерфейс BaseSkill) ──────────────────────────────────────
+    # ── Настройки ────────────────────────────────────────────────────────────
 
     def get_settings(self) -> list:
         return [
             {
                 "key": "api_key",
-                "label": "Groq API ключ",
-                "placeholder": "gsk_...",
+                "label": "Google AI API ключ",
+                "placeholder": "AIza...",
                 "secret": True
             }
         ]
@@ -82,7 +81,7 @@ class EyesSkill(BaseSkill):
     def save_setting(self, key: str, value: str):
         self.save_config({key: value})
 
-    # ── Конфиг ────────────────────────────────────────────────────────────────
+    # ── Конфиг ───────────────────────────────────────────────────────────────
 
     def _config_path(self) -> Path:
         base = Path(__file__).parent.parent / "DEKS_DATA"
@@ -113,7 +112,7 @@ class EyesSkill(BaseSkill):
     def is_configured(self) -> bool:
         return bool(self._config.get("api_key", "").strip())
 
-    # ── Контракт скилла ───────────────────────────────────────────────────────
+    # ── Контракт скилла ──────────────────────────────────────────────────────
 
     def handle(self, command: str) -> str | None:
         cmd = command.lower().strip()
@@ -130,16 +129,15 @@ class EyesSkill(BaseSkill):
 
         return None
 
-    # ── Скриншот ──────────────────────────────────────────────────────────────
+    # ── Скриншот ─────────────────────────────────────────────────────────────
 
     def _take_all_screenshots(self) -> list:
-        """Снимает каждый монитор отдельно. Возвращает список base64."""
         if not MSS_AVAILABLE or not PIL_AVAILABLE:
             return []
         results = []
         try:
             with mss.mss() as sct:
-                n_monitors = len(sct.monitors) - 1  # monitors[0] — виртуальный
+                n_monitors = len(sct.monitors) - 1
                 for i in range(1, n_monitors + 1):
                     try:
                         raw = sct.grab(sct.monitors[i])
@@ -156,7 +154,7 @@ class EyesSkill(BaseSkill):
             self._log(f"[Eyes] Ошибка mss: {e}")
         return results
 
-    # ── Vision API ────────────────────────────────────────────────────────────
+    # ── Vision ───────────────────────────────────────────────────────────────
 
     def _ask_vision(self, user_text: str, reuse_screenshot: bool) -> str:
         if not MSS_AVAILABLE:
@@ -167,7 +165,7 @@ class EyesSkill(BaseSkill):
             return (
                 "Навык Eyes не настроен. "
                 "Добавьте API ключ в настройках скилла. "
-                "Получить бесплатный ключ: console.groq.com/keys"
+                "Получить бесплатный ключ: aistudio.google.com"
             )
 
         if reuse_screenshot and self._last_screenshots:
@@ -180,10 +178,15 @@ class EyesSkill(BaseSkill):
                 self._last_screenshots = screenshots
                 self._context_active = True
 
+        question = (
+            f"Пользователь уточняет: '{user_text}'. Посмотри внимательнее."
+            if reuse_screenshot
+            else "Что сейчас на экране? Опиши кратко."
+        )
+
         valid = [(i, s) for i, s in enumerate(screenshots) if s]
         total = len(valid)
 
-        # Отправляем каждый монитор по очереди в Vision API
         monitor_descriptions = []
         for order, (idx, img_b64) in enumerate(valid):
             monitor_num = order + 1
@@ -193,18 +196,18 @@ class EyesSkill(BaseSkill):
                 self._log(f"[Eyes] Монитор {monitor_num} описан")
             except Exception as e:
                 self._log(f"[Eyes] Ошибка монитора {monitor_num}: {e}")
-                monitor_descriptions.append(f"Монитор {monitor_num}: не удалось получить данные ({e})")
+                monitor_descriptions.append(
+                    f"Монитор {monitor_num}: не удалось получить данные ({e})"
+                )
 
         if not monitor_descriptions:
             return "Не удалось получить данные с мониторов."
 
-        # Все описания готовы — отправляем в главный LLM
         return self._ask_main_llm(user_text, monitor_descriptions)
 
     def _call_vision_api(self, image_b64: str, monitor_n: int, total: int) -> str:
-        """Отправляет скриншот одного монитора в Vision API. Возвращает описание."""
+        """Отправляет скриншот в Google Gemini Vision. Возвращает описание."""
         api_key = self._config["api_key"].strip()
-        api_url = self._config.get("api_url", DEFAULT_CONFIG["api_url"])
         model = self._config.get("model", DEFAULT_CONFIG["model"])
 
         if total > 1:
@@ -213,27 +216,21 @@ class EyesSkill(BaseSkill):
             prompt_text = VISION_PROMPT
 
         payload = {
-            "model": model,
-            "max_tokens": 300,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt_text},
-                        {"type": "image_url",
-                         "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
-                    ]
-                }
-            ]
+            "contents": [{
+                "parts": [
+                    {"text": prompt_text},
+                    {"inline_data": {
+                        "mime_type": "image/jpeg",
+                        "data": image_b64
+                    }}
+                ]
+            }]
         }
 
         body = json.dumps(payload).encode("utf-8")
-        parsed = urllib.parse.urlparse(api_url)
-        conn = http.client.HTTPSConnection(parsed.netloc, timeout=20)
-        conn.request("POST", parsed.path, body=body, headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        })
+        path = f"/v1beta/models/{model}:generateContent?key={api_key}"
+        conn = http.client.HTTPSConnection("generativelanguage.googleapis.com", timeout=20)
+        conn.request("POST", path, body=body, headers={"Content-Type": "application/json"})
         resp = conn.getresponse()
         data = json.loads(resp.read().decode("utf-8"))
         conn.close()
@@ -242,7 +239,7 @@ class EyesSkill(BaseSkill):
             error = data.get("error", {}).get("message", str(data))
             raise Exception(f"API error {resp.status}: {error}")
 
-        return data["choices"][0]["message"]["content"].strip()
+        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
     def _ask_main_llm(self, user_question: str, monitor_descriptions: list) -> str:
         """Отправляет описания мониторов + вопрос пользователя в главный LLM."""
@@ -251,7 +248,7 @@ class EyesSkill(BaseSkill):
             keys = load_api_keys()
             api_key = keys.get("controller_key", "")
             api_url = keys.get("controller_url",
-                                "https://api.groq.com/openai/v1/chat/completions")
+                               "https://api.groq.com/openai/v1/chat/completions")
             model = keys.get("controller_model", "llama-3.3-70b-versatile")
         except Exception as e:
             self._log(f"[Eyes] Не удалось загрузить конфиг контроллера: {e}")
@@ -292,7 +289,7 @@ class EyesSkill(BaseSkill):
             self._log(f"[Eyes] Ошибка главного LLM: {e}")
             return "\n".join(monitor_descriptions)
 
-    # ── Утилиты ───────────────────────────────────────────────────────────────
+    # ── Утилиты ──────────────────────────────────────────────────────────────
 
     def _clear_context(self):
         with self._lock:
