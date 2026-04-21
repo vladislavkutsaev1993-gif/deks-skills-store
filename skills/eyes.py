@@ -1,10 +1,10 @@
 """
 eyes.py — навык зрения DEKS.
-Анализирует экран через Vision AI (Google Gemini).
+Анализирует экран через Vision AI (OpenRouter).
 Скриншот хранится только в RAM, на диск не пишется.
 
 Конфиг: DEKS_DATA/eyes_config.json
-Получить API ключ бесплатно: https://aistudio.google.com
+Получить API ключ бесплатно: https://openrouter.ai
 """
 
 import json
@@ -34,7 +34,7 @@ CONFIG_FILENAME = "eyes_config.json"
 
 DEFAULT_CONFIG = {
     "api_key": "",
-    "model": "gemini-1.5-flash",
+    "model": "google/gemma-4-26b-a4b-it:free",
 }
 
 VISION_PROMPT = (
@@ -66,8 +66,8 @@ class EyesSkill(BaseSkill):
         return [
             {
                 "key": "api_key",
-                "label": "Google AI API ключ",
-                "placeholder": "AIza...",
+                "label": "OpenRouter API ключ",
+                "placeholder": "sk-or-v1-...",
                 "secret": True
             }
         ]
@@ -165,7 +165,7 @@ class EyesSkill(BaseSkill):
             return (
                 "Навык Eyes не настроен. "
                 "Добавьте API ключ в настройках скилла. "
-                "Получить бесплатный ключ: aistudio.google.com"
+                "Получить бесплатный ключ: openrouter.ai"
             )
 
         if reuse_screenshot and self._last_screenshots:
@@ -177,12 +177,6 @@ class EyesSkill(BaseSkill):
             with self._lock:
                 self._last_screenshots = screenshots
                 self._context_active = True
-
-        question = (
-            f"Пользователь уточняет: '{user_text}'. Посмотри внимательнее."
-            if reuse_screenshot
-            else "Что сейчас на экране? Опиши кратко."
-        )
 
         valid = [(i, s) for i, s in enumerate(screenshots) if s]
         total = len(valid)
@@ -206,7 +200,7 @@ class EyesSkill(BaseSkill):
         return self._ask_main_llm(user_text, monitor_descriptions)
 
     def _call_vision_api(self, image_b64: str, monitor_n: int, total: int) -> str:
-        """Отправляет скриншот в Google Gemini Vision. Возвращает описание."""
+        """Отправляет скриншот в OpenRouter Vision. Возвращает описание."""
         api_key = self._config["api_key"].strip()
         model = self._config.get("model", DEFAULT_CONFIG["model"])
 
@@ -216,21 +210,24 @@ class EyesSkill(BaseSkill):
             prompt_text = VISION_PROMPT
 
         payload = {
-            "contents": [{
-                "parts": [
-                    {"text": prompt_text},
-                    {"inline_data": {
-                        "mime_type": "image/jpeg",
-                        "data": image_b64
-                    }}
+            "model": model,
+            "max_tokens": 300,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt_text},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
                 ]
             }]
         }
 
         body = json.dumps(payload).encode("utf-8")
-        path = f"/v1/models/{model}:generateContent?key={api_key}"
-        conn = http.client.HTTPSConnection("generativelanguage.googleapis.com", timeout=20)
-        conn.request("POST", path, body=body, headers={"Content-Type": "application/json"})
+        conn = http.client.HTTPSConnection("openrouter.ai", timeout=20)
+        conn.request("POST", "/api/v1/chat/completions", body=body, headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": "https://deks.app",
+        })
         resp = conn.getresponse()
         data = json.loads(resp.read().decode("utf-8"))
         conn.close()
@@ -239,7 +236,7 @@ class EyesSkill(BaseSkill):
             error = data.get("error", {}).get("message", str(data))
             raise Exception(f"API error {resp.status}: {error}")
 
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        return data["choices"][0]["message"]["content"].strip()
 
     def _ask_main_llm(self, user_question: str, monitor_descriptions: list) -> str:
         """Отправляет описания мониторов + вопрос пользователя в главный LLM."""
