@@ -12,6 +12,7 @@ import base64
 import threading
 import http.client
 import urllib.parse
+import time
 from io import BytesIO
 from pathlib import Path
 
@@ -184,6 +185,8 @@ class EyesSkill(BaseSkill):
         monitor_descriptions = []
         for order, (idx, img_b64) in enumerate(valid):
             monitor_num = order + 1
+            if order > 0:
+                time.sleep(3)  # пауза между запросами — бесплатный rate limit
             try:
                 desc = self._call_vision_api(img_b64, monitor_num, total)
                 monitor_descriptions.append(f"Монитор {monitor_num}: {desc}")
