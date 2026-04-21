@@ -77,6 +77,9 @@ class EyesSkill(BaseSkill):
             }
         ]
 
+    def get_data_files(self) -> list:
+    return ["eyes_config.json"]
+    
     def load_setting(self, key: str, default: str = "") -> str:
         return self._config.get(key, default)
 
