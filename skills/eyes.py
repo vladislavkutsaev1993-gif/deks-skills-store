@@ -34,7 +34,7 @@ CONFIG_FILENAME = "eyes_config.json"
 
 DEFAULT_CONFIG = {
     "api_key": "",
-    "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+    "model": "llama-3.2-11b-vision-preview",
     "api_url": "https://api.groq.com/openai/v1/chat/completions"
 }
 
