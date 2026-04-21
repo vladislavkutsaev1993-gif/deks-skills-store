@@ -38,21 +38,17 @@ DEFAULT_CONFIG = {
     "api_url": "https://api.groq.com/openai/v1/chat/completions"
 }
 
-VISION_SYSTEM_PROMPT = (
-    "Ты — зрительный модуль голосового ассистента DEKS. "
-    "Тебе показывают скриншот экрана пользователя. "
-    "Опиши кратко и по делу что видишь: какие приложения открыты, "
-    "что происходит на экране. Говори на русском языке. "
-    "Будь конкретным, не используй длинные перечисления. "
-    "Максимум 2-3 предложения если не просят подробнее."
+VISION_PROMPT = (
+    "Опиши кратко что видишь на этом скриншоте: "
+    "какие приложения открыты, что происходит на экране. "
+    "Только факты, без лишних слов. На русском языке. "
+    "Максимум 3 предложения."
 )
 
 VISION_MONITOR_PROMPT = (
-    "Ты — зрительный модуль голосового ассистента DEKS. "
-    "Тебе показывают скриншот монитора {n} из {total}. "
-    "Опиши кратко что видишь на этом мониторе: какие приложения открыты, "
-    "что происходит. Говори на русском языке. "
-    "1-2 предложения максимум."
+    "Это монитор {n} из {total}. "
+    "Опиши кратко что видишь: какие приложения открыты, что происходит. "
+    "Только факты, на русском языке. Максимум 2 предложения."
 )
 
 
@@ -66,7 +62,7 @@ class EyesSkill(BaseSkill):
         self._lock = threading.Lock()
 
     # ── Настройки (интерфейс BaseSkill) ──────────────────────────────────────
-    
+
     def get_settings(self) -> list:
         return [
             {
@@ -85,7 +81,7 @@ class EyesSkill(BaseSkill):
 
     def save_setting(self, key: str, value: str):
         self.save_config({key: value})
-        
+
     # ── Конфиг ────────────────────────────────────────────────────────────────
 
     def _config_path(self) -> Path:
@@ -137,13 +133,13 @@ class EyesSkill(BaseSkill):
     # ── Скриншот ──────────────────────────────────────────────────────────────
 
     def _take_all_screenshots(self) -> list:
-        """Снимает каждый монитор отдельно. Возвращает список base64 (один элемент на монитор)."""
+        """Снимает каждый монитор отдельно. Возвращает список base64."""
         if not MSS_AVAILABLE or not PIL_AVAILABLE:
             return []
         results = []
         try:
             with mss.mss() as sct:
-                n_monitors = len(sct.monitors) - 1  # monitors[0] — виртуальный (все вместе)
+                n_monitors = len(sct.monitors) - 1  # monitors[0] — виртуальный
                 for i in range(1, n_monitors + 1):
                     try:
                         raw = sct.grab(sct.monitors[i])
@@ -184,80 +180,48 @@ class EyesSkill(BaseSkill):
                 self._last_screenshots = screenshots
                 self._context_active = True
 
-        question = (
-            f"Пользователь уточняет: '{user_text}'. Посмотри внимательнее."
-            if reuse_screenshot
-            else "Что сейчас на экране? Опиши кратко."
-        )
-
         valid = [(i, s) for i, s in enumerate(screenshots) if s]
         total = len(valid)
 
-        try:
-            if total == 1:
-                return self._call_vision_api(valid[0][1], question, 1, 1)
-            else:
-                # Параллельные запросы — один на каждый монитор
-                results = {}
-                errors = []
+        # Отправляем каждый монитор по очереди в Vision API
+        monitor_descriptions = []
+        for order, (idx, img_b64) in enumerate(valid):
+            monitor_num = order + 1
+            try:
+                desc = self._call_vision_api(img_b64, monitor_num, total)
+                monitor_descriptions.append(f"Монитор {monitor_num}: {desc}")
+                self._log(f"[Eyes] Монитор {monitor_num} описан")
+            except Exception as e:
+                self._log(f"[Eyes] Ошибка монитора {monitor_num}: {e}")
+                monitor_descriptions.append(f"Монитор {monitor_num}: не удалось получить данные ({e})")
 
-                def _worker(idx, monitor_num, img_b64):
-                    try:
-                        results[idx] = self._call_vision_api(
-                            img_b64, question, monitor_num, total
-                        )
-                    except Exception as e:
-                        self._log(f"[Eyes] Ошибка монитора {monitor_num}: {e}")
-                        errors.append(f"монитор {monitor_num}: {e}")
+        if not monitor_descriptions:
+            return "Не удалось получить данные с мониторов."
 
-                threads = []
-                for order, (idx, s) in enumerate(valid):
-                    t = threading.Thread(target=_worker, args=(idx, order + 1, s))
-                    t.start()
-                    threads.append(t)
+        # Все описания готовы — отправляем в главный LLM
+        return self._ask_main_llm(user_text, monitor_descriptions)
 
-                for t in threads:
-                    t.join(timeout=30)
-
-                parts = [
-                    f"Монитор {order + 1}: {results[idx]}"
-                    for order, (idx, _) in enumerate(valid)
-                    if idx in results
-                ]
-                if not parts:
-                    return f"Не удалось получить данные. {'; '.join(errors)}"
-                return "\n".join(parts)
-
-        except Exception as e:
-            self._log(f"[Eyes] Ошибка Vision API: {e}")
-            return "Не удалось получить ответ от Vision AI. Проверьте API ключ в настройках."
-
-    def _call_vision_api(self, image_b64: str, question: str,
-                         monitor_n: int, total: int) -> str:
+    def _call_vision_api(self, image_b64: str, monitor_n: int, total: int) -> str:
+        """Отправляет скриншот одного монитора в Vision API. Возвращает описание."""
         api_key = self._config["api_key"].strip()
         api_url = self._config.get("api_url", DEFAULT_CONFIG["api_url"])
         model = self._config.get("model", DEFAULT_CONFIG["model"])
 
         if total > 1:
-            system_text = VISION_MONITOR_PROMPT.format(n=monitor_n, total=total)
+            prompt_text = VISION_MONITOR_PROMPT.format(n=monitor_n, total=total)
         else:
-            system_text = VISION_SYSTEM_PROMPT
+            prompt_text = VISION_PROMPT
 
         payload = {
             "model": model,
-            "max_tokens": 512,
+            "max_tokens": 300,
             "messages": [
                 {
                     "role": "user",
                     "content": [
-                        {
-                            "type": "text",
-                            "text": system_text + "\n\n" + question
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}
-                        }
+                        {"type": "text", "text": prompt_text},
+                        {"type": "image_url",
+                         "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
                     ]
                 }
             ]
@@ -279,6 +243,54 @@ class EyesSkill(BaseSkill):
             raise Exception(f"API error {resp.status}: {error}")
 
         return data["choices"][0]["message"]["content"].strip()
+
+    def _ask_main_llm(self, user_question: str, monitor_descriptions: list) -> str:
+        """Отправляет описания мониторов + вопрос пользователя в главный LLM."""
+        try:
+            from config import load_api_keys
+            keys = load_api_keys()
+            api_key = keys.get("controller_key", "")
+            api_url = keys.get("controller_url",
+                                "https://api.groq.com/openai/v1/chat/completions")
+            model = keys.get("controller_model", "llama-3.3-70b-versatile")
+        except Exception as e:
+            self._log(f"[Eyes] Не удалось загрузить конфиг контроллера: {e}")
+            return "\n".join(monitor_descriptions)
+
+        screen_context = "\n".join(monitor_descriptions)
+        prompt = (
+            f"Пользователь спросил: \"{user_question}\"\n\n"
+            f"На экране:\n{screen_context}\n\n"
+            f"Ответь пользователю кратко и по делу. "
+            f"Стиль — Джарвис. Только русский язык. Максимум 2-3 предложения."
+        )
+
+        payload = {
+            "model": model,
+            "max_tokens": 512,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+
+        try:
+            body = json.dumps(payload).encode("utf-8")
+            parsed = urllib.parse.urlparse(api_url)
+            conn = http.client.HTTPSConnection(parsed.netloc, timeout=20)
+            conn.request("POST", parsed.path, body=body, headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            })
+            resp = conn.getresponse()
+            data = json.loads(resp.read().decode("utf-8"))
+            conn.close()
+
+            if resp.status != 200:
+                return "\n".join(monitor_descriptions)
+
+            return data["choices"][0]["message"]["content"].strip()
+
+        except Exception as e:
+            self._log(f"[Eyes] Ошибка главного LLM: {e}")
+            return "\n".join(monitor_descriptions)
 
     # ── Утилиты ───────────────────────────────────────────────────────────────
 
