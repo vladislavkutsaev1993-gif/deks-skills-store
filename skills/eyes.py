@@ -80,13 +80,13 @@ class EyesSkill(BaseSkill):
                 threading.Thread(
                     target=self._async_vision, args=(cmd, True), daemon=True
                 ).start()
-                return "Смотрю внимательнее..."
+                return ""  # молчаливый захват, результат придёт через app.after
 
         if self.is_hit(cmd, "eyes_look"):
             threading.Thread(
                 target=self._async_vision, args=(cmd, False), daemon=True
             ).start()
-            return "Анализирую экран, подождите..."
+            return ""  # молчаливый захват, результат придёт через app.after
 
         if self._context_active:
             self._clear_context()
