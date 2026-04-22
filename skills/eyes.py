@@ -77,15 +77,27 @@ class EyesSkill(BaseSkill):
 
         if self._context_active and self._last_img is not None:
             if self.is_hit(cmd, "eyes_clarify"):
-                return self._ask_vision(cmd, reuse=True)
+                threading.Thread(
+                    target=self._async_vision, args=(cmd, True), daemon=True
+                ).start()
+                return "Смотрю внимательнее..."
 
         if self.is_hit(cmd, "eyes_look"):
-            return self._ask_vision(cmd, reuse=False)
+            threading.Thread(
+                target=self._async_vision, args=(cmd, False), daemon=True
+            ).start()
+            return "Анализирую экран, подождите..."
 
         if self._context_active:
             self._clear_context()
 
         return None
+
+    def _async_vision(self, user_text: str, reuse: bool):
+        """Запускает _ask_vision в фоне и пушит результат в UI через app.after."""
+        result = self._ask_vision(user_text, reuse)
+        if result:
+            self.app.after(0, lambda r=result: self.app.deks_say(r))
 
     # ── Модель ───────────────────────────────────────────────────────────────
 
