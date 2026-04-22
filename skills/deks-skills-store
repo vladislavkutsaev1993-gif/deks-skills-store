@@ -10,7 +10,7 @@
     "download_url": "https://raw.githubusercontent.com/vladislavkutsaev1993-gif/deks-skills-store/main/skills/eyes.py",
     "pip_requirements": ["mss", "Pillow", "transformers", "torch"],
     "hf_model_id": "HuggingFaceTB/SmolVLM-256M-Instruct",
-    "hf_model_size_mb": 900,
+    "hf_model_size_mb": 520,
     "triggers": {
       "eyes_look": {
         "label": "Посмотреть на экран",
