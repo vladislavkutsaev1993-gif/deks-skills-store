@@ -96,14 +96,17 @@ class EyesSkill(BaseSkill):
             import torch
             self._log("[Eyes] Загружаю SmolVLM в память...")
 
-            # Попытка 1: AutoProcessor + AutoModelForVision2Seq
+            # Попытка 1: AutoProcessor + AutoModelForVision2Seq (trust_remote_code для SmolVLM)
             try:
                 from transformers import AutoProcessor, AutoModelForVision2Seq
-                self._processor = AutoProcessor.from_pretrained(MODEL_ID)
+                self._processor = AutoProcessor.from_pretrained(
+                    MODEL_ID, trust_remote_code=True
+                )
                 self._model = AutoModelForVision2Seq.from_pretrained(
                     MODEL_ID,
                     torch_dtype=torch.float32,
                     _attn_implementation="eager",
+                    trust_remote_code=True,
                 )
                 self._model_ready = True
                 self._log("[Eyes] Модель готова (Auto)")
@@ -114,10 +117,13 @@ class EyesSkill(BaseSkill):
             # Попытка 2: Idefics3 (архитектура SmolVLM)
             try:
                 from transformers import Idefics3Processor, Idefics3ForConditionalGeneration
-                self._processor = Idefics3Processor.from_pretrained(MODEL_ID)
+                self._processor = Idefics3Processor.from_pretrained(
+                    MODEL_ID, trust_remote_code=True
+                )
                 self._model = Idefics3ForConditionalGeneration.from_pretrained(
                     MODEL_ID,
                     torch_dtype=torch.float32,
+                    trust_remote_code=True,
                 )
                 self._model_ready = True
                 self._log("[Eyes] Модель готова (Idefics3)")
