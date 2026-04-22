@@ -93,10 +93,12 @@ class EyesSkill(BaseSkill):
         with self._model_lock:
             if self._model_ready:
                 return True
+            import torch
+            self._log("[Eyes] Загружаю SmolVLM в память...")
+
+            # Попытка 1: AutoProcessor + AutoModelForVision2Seq
             try:
-                import torch
                 from transformers import AutoProcessor, AutoModelForVision2Seq
-                self._log("[Eyes] Загружаю SmolVLM в память...")
                 self._processor = AutoProcessor.from_pretrained(MODEL_ID)
                 self._model = AutoModelForVision2Seq.from_pretrained(
                     MODEL_ID,
@@ -104,10 +106,24 @@ class EyesSkill(BaseSkill):
                     _attn_implementation="eager",
                 )
                 self._model_ready = True
-                self._log("[Eyes] Модель готова")
+                self._log("[Eyes] Модель готова (Auto)")
                 return True
-            except Exception as e:
-                self._log(f"[Eyes] Ошибка загрузки модели: {e}")
+            except Exception as e1:
+                self._log(f"[Eyes] Auto-загрузка не удалась ({e1}), пробую Idefics3...")
+
+            # Попытка 2: Idefics3 (архитектура SmolVLM)
+            try:
+                from transformers import Idefics3Processor, Idefics3ForConditionalGeneration
+                self._processor = Idefics3Processor.from_pretrained(MODEL_ID)
+                self._model = Idefics3ForConditionalGeneration.from_pretrained(
+                    MODEL_ID,
+                    torch_dtype=torch.float32,
+                )
+                self._model_ready = True
+                self._log("[Eyes] Модель готова (Idefics3)")
+                return True
+            except Exception as e2:
+                self._log(f"[Eyes] Ошибка загрузки модели: {e2}")
                 return False
 
     # ── Скриншот ─────────────────────────────────────────────────────────────
