@@ -1,16 +1,16 @@
 """
 eyes.py — навык зрения DEKS.
-Анализирует экран локально через SmolVLM-256M.
-Скриншоты только в RAM, на диск не сохраняются.
-Не требует API ключей. Работает полностью офлайн.
+Анализирует экран через Groq Vision (llama-4-scout).
+Быстро (~1-2с), бесплатно, работает без VPN.
+По умолчанию использует ключ Groq из настроек DEKS.
 """
 
 import threading
 import urllib.parse
 import http.client
 import json
+import base64
 from io import BytesIO
-from pathlib import Path
 
 try:
     import mss
@@ -26,22 +26,8 @@ except ImportError:
 
 from skills.base_skill import BaseSkill
 
-MODEL_ID = "HuggingFaceTB/SmolVLM-256M-Instruct"
-
-
-def _build_prompt(n_monitors: int) -> str:
-    if n_monitors == 1:
-        return (
-            "Describe briefly what you see on this screenshot: "
-            "which apps are open, what is happening on screen. "
-            "Facts only. Answer in Russian. Max 3 sentences."
-        )
-    return (
-        f"This image combines {n_monitors} monitors side by side (left to right). "
-        f"Briefly describe what is on each monitor in order: "
-        f"which apps are open, what is happening. "
-        f"Facts only. Answer in Russian. Max 2 sentences per monitor."
-    )
+GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 
 class EyesSkill(BaseSkill):
@@ -52,23 +38,24 @@ class EyesSkill(BaseSkill):
         self._last_n_monitors = 1
         self._context_active = False
         self._lock = threading.Lock()
-        self._model = None
-        self._processor = None
-        self._model_lock = threading.Lock()
-        self._model_ready = False
-        # Прогреваем модель в фоне сразу при старте
-        threading.Thread(target=self._load_model, daemon=True).start()
 
     # ── Контракт маркета ─────────────────────────────────────────────────────
 
     def get_settings(self) -> list:
-        return []  # Ключи не нужны — всё локально
+        return [
+            {
+                "key": "groq_key",
+                "label": "Groq API ключ (необязательно)",
+                "placeholder": "gsk_... (если пусто — используется ключ DEKS)",
+                "secret": True,
+            }
+        ]
 
     def get_data_files(self) -> list:
-        return []  # Нет конфиг-файлов
+        return []
 
     def is_configured(self) -> bool:
-        return True  # Всегда готов если установлен
+        return True  # Работает с ключом из DEKS или своим
 
     # ── handle ───────────────────────────────────────────────────────────────
 
@@ -80,13 +67,13 @@ class EyesSkill(BaseSkill):
                 threading.Thread(
                     target=self._async_vision, args=(cmd, True), daemon=True
                 ).start()
-                return ""  # молчаливый захват, результат придёт через app.after
+                return ""  # молчаливый захват
 
         if self.is_hit(cmd, "eyes_look"):
             threading.Thread(
                 target=self._async_vision, args=(cmd, False), daemon=True
             ).start()
-            return ""  # молчаливый захват, результат придёт через app.after
+            return ""  # молчаливый захват
 
         if self._context_active:
             self._clear_context()
@@ -94,50 +81,9 @@ class EyesSkill(BaseSkill):
         return None
 
     def _async_vision(self, user_text: str, reuse: bool):
-        """Запускает _ask_vision в фоне и пушит результат в UI через app.after."""
         result = self._ask_vision(user_text, reuse)
         if result:
             self.app.after(0, lambda r=result: self.app.deks_say(r))
-
-    # ── Модель ───────────────────────────────────────────────────────────────
-
-    def _load_model(self) -> bool:
-        with self._model_lock:
-            if self._model_ready:
-                return True
-            import torch
-            self._log("[Eyes] Загружаю SmolVLM в память...")
-
-            # Попытка 1: новое имя (transformers 5+)
-            try:
-                from transformers import AutoProcessor, AutoModelForImageTextToText
-                self._processor = AutoProcessor.from_pretrained(MODEL_ID)
-                self._model = AutoModelForImageTextToText.from_pretrained(
-                    MODEL_ID,
-                    dtype=torch.float32,
-                    _attn_implementation="eager",
-                )
-                self._model_ready = True
-                self._log("[Eyes] Модель готова")
-                return True
-            except Exception as e1:
-                self._log(f"[Eyes] ImageTextToText не удался ({e1}), пробую Vision2Seq...")
-
-            # Попытка 2: старое имя (transformers 4.x)
-            try:
-                from transformers import AutoProcessor, AutoModelForVision2Seq
-                self._processor = AutoProcessor.from_pretrained(MODEL_ID)
-                self._model = AutoModelForVision2Seq.from_pretrained(
-                    MODEL_ID,
-                    torch_dtype=torch.float32,
-                    _attn_implementation="eager",
-                )
-                self._model_ready = True
-                self._log("[Eyes] Модель готова")
-                return True
-            except Exception as e2:
-                self._log(f"[Eyes] Ошибка загрузки модели: {e2}")
-                return False
 
     # ── Скриншот ─────────────────────────────────────────────────────────────
 
@@ -149,7 +95,7 @@ class EyesSkill(BaseSkill):
                 n = len(sct.monitors) - 1
                 raw = sct.grab(sct.monitors[0])
                 img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
-                img.thumbnail((1280, 720), Image.LANCZOS)
+                img.thumbnail((1920, 600), Image.LANCZOS)
                 return img, n
         except Exception as e:
             self._log(f"[Eyes] Ошибка скриншота: {e}")
@@ -168,7 +114,7 @@ class EyesSkill(BaseSkill):
         else:
             img, n = self._take_screenshot()
             if img is None:
-                return "Не удалось сделать скриншот экрана."
+                return "Не удалось сделать скриншот."
             with self._lock:
                 self._last_img = img
                 self._last_n_monitors = n
@@ -176,54 +122,76 @@ class EyesSkill(BaseSkill):
 
         self._log(f"[Eyes] Скриншот готов, мониторов: {n}")
 
-        if not self._model_ready:
-            if not self._load_model():
-                return "Модель зрения не загружена. Переустановите навык Eyes."
+        # Конвертируем в base64
+        buf = BytesIO()
+        img.save(buf, format="JPEG", quality=80)
+        img_b64 = base64.b64encode(buf.getvalue()).decode()
+
+        # Промпт с учётом числа мониторов
+        if n == 1:
+            vision_prompt = (
+                "Опиши кратко что видишь на скриншоте: "
+                "какие приложения открыты, что происходит. "
+                "Только факты. На русском. Максимум 3 предложения."
+            )
+        else:
+            vision_prompt = (
+                f"На картинке {n} монитора слева направо. "
+                f"Опиши кратко что на каждом: приложения, контент. "
+                f"Только факты. На русском. Максимум 2 предложения на монитор."
+            )
+
+        # Получаем описание от Groq Vision
+        screen_desc = self._call_groq_vision(img_b64, vision_prompt)
+        if not screen_desc:
+            return "Не удалось проанализировать экран."
+
+        self._log("[Eyes] Описание получено")
+
+        # Передаём описание основному LLM для финального ответа
+        return self._ask_main_llm(user_text, screen_desc, n)
+
+    def _call_groq_vision(self, img_b64: str, prompt: str) -> str:
+        api_key = self._get_api_key()
+        if not api_key:
+            return ""
+
+        payload = {
+            "model": GROQ_MODEL,
+            "max_tokens": 400,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {
+                    "url": f"data:image/jpeg;base64,{img_b64}"
+                }}
+            ]}]
+        }
 
         try:
-            desc = self._run_inference(img, n)
-            self._log("[Eyes] Описание получено")
+            body = json.dumps(payload).encode("utf-8")
+            conn = http.client.HTTPSConnection("api.groq.com", timeout=20)
+            conn.request("POST", "/openai/v1/chat/completions", body=body, headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            })
+            resp = conn.getresponse()
+            data = json.loads(resp.read().decode("utf-8"))
+            conn.close()
+            if resp.status != 200:
+                self._log(f"[Eyes] Groq Vision ERR {resp.status}: {data}")
+                return ""
+            return data["choices"][0]["message"]["content"].strip()
         except Exception as e:
-            self._log(f"[Eyes] Ошибка inference: {e}")
-            return f"Ошибка модели: {e}"
+            self._log(f"[Eyes] Groq Vision exception: {e}")
+            return ""
 
-        return self._ask_main_llm(user_text, desc, n)
-
-    def _run_inference(self, img: "Image.Image", n_monitors: int) -> str:
-        import torch
-        messages = [{
-            "role": "user",
-            "content": [
-                {"type": "image"},
-                {"type": "text", "text": _build_prompt(n_monitors)}
-            ]
-        }]
-        prompt = self._processor.apply_chat_template(
-            messages, add_generation_prompt=True
-        )
-        inputs = self._processor(text=prompt, images=[img], return_tensors="pt")
-        with torch.no_grad():
-            ids = self._model.generate(**inputs, max_new_tokens=300)
-        texts = self._processor.batch_decode(ids, skip_special_tokens=True)
-        result = texts[0] if texts else ""
-        if "Assistant:" in result:
-            result = result.split("Assistant:")[-1].strip()
-        return result
-
-    def _ask_main_llm(self, user_question: str, screen_desc: str, n_monitors: int) -> str:
-        try:
-            from config import load_api_keys
-            keys = load_api_keys()
-            api_key = keys.get("controller_key", "")
-            api_url = keys.get("controller_url",
-                               "https://api.groq.com/openai/v1/chat/completions")
-            model = keys.get("controller_model", "llama-3.3-70b-versatile")
-        except Exception as e:
-            self._log(f"[Eyes] Конфиг недоступен: {e}")
+    def _ask_main_llm(self, user_question: str, screen_desc: str, n: int) -> str:
+        api_key = self._get_api_key()
+        if not api_key:
             return screen_desc
 
         n_word = (
-            f"{n_monitors} монитор{'а' if 2 <= n_monitors <= 4 else 'ов' if n_monitors > 4 else ''}"
+            f"{n} монитор{'а' if 2 <= n <= 4 else 'ов' if n > 4 else ''}"
         )
         prompt = (
             f"Пользователь спросил: \"{user_question}\"\n\n"
@@ -231,18 +199,32 @@ class EyesSkill(BaseSkill):
             f"Ответь кратко и по делу. "
             f"Только русский язык. Максимум 2-3 предложения."
         )
+
+        # Берём модель из настроек DEKS (может быть не Groq)
+        try:
+            from config import load_api_keys
+            keys = load_api_keys()
+            ctrl_url = keys.get("controller_url", GROQ_API_URL)
+            ctrl_model = keys.get("controller_model", "llama-3.3-70b-versatile")
+            ctrl_key = keys.get("controller_key", api_key)
+        except Exception:
+            ctrl_url = GROQ_API_URL
+            ctrl_model = "llama-3.3-70b-versatile"
+            ctrl_key = api_key
+
         payload = {
-            "model": model,
-            "max_tokens": 512,
+            "model": ctrl_model,
+            "max_tokens": 256,
             "messages": [{"role": "user", "content": prompt}]
         }
+
         try:
             body = json.dumps(payload).encode("utf-8")
-            parsed = urllib.parse.urlparse(api_url)
-            conn = http.client.HTTPSConnection(parsed.netloc, timeout=20)
+            parsed = urllib.parse.urlparse(ctrl_url)
+            conn = http.client.HTTPSConnection(parsed.netloc, timeout=15)
             conn.request("POST", parsed.path, body=body, headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Bearer {ctrl_key}",
             })
             resp = conn.getresponse()
             data = json.loads(resp.read().decode("utf-8"))
@@ -251,10 +233,21 @@ class EyesSkill(BaseSkill):
                 return screen_desc
             return data["choices"][0]["message"]["content"].strip()
         except Exception as e:
-            self._log(f"[Eyes] Ошибка LLM: {e}")
+            self._log(f"[Eyes] LLM exception: {e}")
             return screen_desc
 
     # ── Утилиты ──────────────────────────────────────────────────────────────
+
+    def _get_api_key(self) -> str:
+        """Свой ключ из настроек навыка → иначе ключ DEKS (Groq)."""
+        own_key = self.load_setting("groq_key", "").strip()
+        if own_key:
+            return own_key
+        try:
+            from config import load_api_keys
+            return load_api_keys().get("controller_key", "")
+        except Exception:
+            return ""
 
     def _clear_context(self):
         with self._lock:
