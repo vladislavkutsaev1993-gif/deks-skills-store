@@ -96,37 +96,32 @@ class EyesSkill(BaseSkill):
             import torch
             self._log("[Eyes] Загружаю SmolVLM в память...")
 
-            # Попытка 1: AutoProcessor + AutoModelForVision2Seq (trust_remote_code для SmolVLM)
+            # Попытка 1: новое имя (transformers 5+)
+            try:
+                from transformers import AutoProcessor, AutoModelForImageTextToText
+                self._processor = AutoProcessor.from_pretrained(MODEL_ID)
+                self._model = AutoModelForImageTextToText.from_pretrained(
+                    MODEL_ID,
+                    dtype=torch.float32,
+                    _attn_implementation="eager",
+                )
+                self._model_ready = True
+                self._log("[Eyes] Модель готова")
+                return True
+            except Exception as e1:
+                self._log(f"[Eyes] ImageTextToText не удался ({e1}), пробую Vision2Seq...")
+
+            # Попытка 2: старое имя (transformers 4.x)
             try:
                 from transformers import AutoProcessor, AutoModelForVision2Seq
-                self._processor = AutoProcessor.from_pretrained(
-                    MODEL_ID, trust_remote_code=True
-                )
+                self._processor = AutoProcessor.from_pretrained(MODEL_ID)
                 self._model = AutoModelForVision2Seq.from_pretrained(
                     MODEL_ID,
                     torch_dtype=torch.float32,
                     _attn_implementation="eager",
-                    trust_remote_code=True,
                 )
                 self._model_ready = True
-                self._log("[Eyes] Модель готова (Auto)")
-                return True
-            except Exception as e1:
-                self._log(f"[Eyes] Auto-загрузка не удалась ({e1}), пробую Idefics3...")
-
-            # Попытка 2: Idefics3 (архитектура SmolVLM)
-            try:
-                from transformers import Idefics3Processor, Idefics3ForConditionalGeneration
-                self._processor = Idefics3Processor.from_pretrained(
-                    MODEL_ID, trust_remote_code=True
-                )
-                self._model = Idefics3ForConditionalGeneration.from_pretrained(
-                    MODEL_ID,
-                    torch_dtype=torch.float32,
-                    trust_remote_code=True,
-                )
-                self._model_ready = True
-                self._log("[Eyes] Модель готова (Idefics3)")
+                self._log("[Eyes] Модель готова")
                 return True
             except Exception as e2:
                 self._log(f"[Eyes] Ошибка загрузки модели: {e2}")
