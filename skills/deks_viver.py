@@ -1,13 +1,8 @@
 """
-DEKS Viver — тонкий skill-bridge.
+DEKS Viver — skill-bridge + auto-installer пакета.
 
-Как советовал GPT: этот файл должен быть ОЧЕНЬ тонким.
-Вся логика — в пакете deks_viver/.
-
-Этот файл только:
-  1. Определяет DeksViverSkill (голосовые команды)
-  2. Запускает runtime (deks_viver/server.py)
-  3. Предоставляет try_open_in_viver() для ollama_mixin
+Магазин скачивает только этот файл.
+При первом запуске он сам скачивает deks_viver/ пакет с GitHub.
 """
 
 import os
@@ -17,6 +12,47 @@ import time
 import threading
 import subprocess
 import urllib.request
+
+# ── Авто-установка пакета deks_viver/ ─────────────────────────────────────────
+
+_GITHUB_RAW = (
+    "https://raw.githubusercontent.com/vladislavkutsaev1993-gif/"
+    "deks-skills-store/main/deks_viver/{filename}"
+)
+_PKG_MODULES = [
+    "__init__.py",
+    "session.py",
+    "controller.py",
+    "browser.py",
+    "goals.py",
+    "permissions.py",
+    "server.py",
+]
+_PKG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "deks_viver")
+
+
+def _setup_package():
+    """Скачать deks_viver/ пакет если ещё не установлен."""
+    os.makedirs(_PKG_DIR, exist_ok=True)
+    missing = [m for m in _PKG_MODULES if not os.path.exists(os.path.join(_PKG_DIR, m))]
+    if not missing:
+        return   # всё уже есть
+
+    print(f"[VIVER] Downloading package modules: {missing}")
+    for filename in missing:
+        url  = _GITHUB_RAW.format(filename=filename)
+        dest = os.path.join(_PKG_DIR, filename)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "DEKS"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                with open(dest, "wb") as f:
+                    f.write(r.read())
+            print(f"[VIVER] Downloaded: {filename}")
+        except Exception as ex:
+            print(f"[VIVER] Failed to download {filename}: {ex}")
+
+
+_setup_package()
 
 VIVER_PORT = 7547
 VIVER_URL  = f"http://localhost:{VIVER_PORT}"
