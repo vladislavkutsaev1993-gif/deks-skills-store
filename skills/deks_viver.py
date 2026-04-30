@@ -1,18 +1,24 @@
 """
-DEKS Viver — интерактивное медиа-окно DEKS.
-Устанавливается через магазин навыков.
+DEKS Viver — интерактивное пространство действий DEKS.
 
-Если установлен — ВСЁ интернет-содержимое открывается через него.
-Авто-запускается при первом запросе. Может видеть что открыл.
+Архитектура (как советовал GPT):
+  ┌─ DEKS Agent Layer ──────────────────────────────┐
+  │  ├─ Viewer Runtime (Playwright, headless=False)  │
+  │  │    └─ ViewerController (abstraction layer)    │
+  │  └─ HTTP Bridge localhost:7547                   │
+  └─────────────────────────────────────────────────┘
 
-Два режима одного файла:
-  - Skill mode  (импортируется DEKS)
-  - Runtime mode (subprocess с флагом --runtime)
+Если установлен — ВСЁ web-содержимое идёт через него.
+Авто-запуск. Авто-плей. Авто-dismiss попапов.
+Видит что открыто через DOM (не только скриншот).
 """
+
 import os
 import sys
 import json
 import time
+import queue
+import uuid
 import threading
 import subprocess
 import urllib.request
@@ -20,210 +26,380 @@ import urllib.request
 VIVER_PORT = 7547
 VIVER_URL  = f"http://localhost:{VIVER_PORT}"
 
-# Синглтон — ссылка на живой экземпляр скилла (устанавливается в __init__)
-_viver_skill_instance = None
+_viver_skill_instance = None   # синглтон, ставится при загрузке скилла
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  RUNTIME — отдельный subprocess: python deks_viver.py --runtime
+#  RUNTIME — subprocess: python deks_viver.py --runtime
 # ══════════════════════════════════════════════════════════════════════════════
 
 if "--runtime" in sys.argv:
-    import webview
+
+    from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
     from http.server import HTTPServer, BaseHTTPRequestHandler
 
-    _window = None
-    _state  = {
+    # Очередь команд (HTTP-поток → Playwright-поток)
+    _cmd_q      = queue.Queue()
+    _result_map = {}
+    _result_lck = threading.Lock()
+
+    # Глобальное состояние вивера
+    _state = {
         "url":        "",
         "title":      "",
+        "playing":    False,
         "fullscreen": False,
         "history":    [],
-        "playing":    False,
+        "last_goal":  "",
     }
 
-    # JS-скрипт который инжектируется при каждой загрузке страницы
-    _AUTO_INJECT_JS = """
-    (function() {
-        // Авто-плей видео на YouTube / Netflix / любом сайте
-        function tryPlay() {
-            var v = document.querySelector('video');
-            if (v && v.paused && v.readyState >= 2) { v.play(); }
-        }
-        // Небольшая задержка — страница должна отрисоваться
-        setTimeout(tryPlay, 1500);
-        setTimeout(tryPlay, 3000);
-    })();
-    """
+    # ── ViewerController — абстракция над Playwright ──────────────────────
 
-    def _update_state():
-        try:
-            url   = _window.evaluate_js("location.href")
-            title = _window.evaluate_js("document.title")
-            playing = _window.evaluate_js(
-                "var v=document.querySelector('video'); v ? !v.paused : false"
+    class ViewerController:
+        """
+        Abstraction layer над браузером.
+        Бэкенд (Playwright) можно заменить — публичный API останется.
+        """
+
+        def __init__(self, page):
+            self.page = page
+
+        # ── Навигация ─────────────────────────────────────────────────────
+
+        def open_url(self, url: str):
+            self.page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            time.sleep(1.2)
+            self.dismiss_popups()
+            time.sleep(0.8)
+            self._try_autoplay()
+            self._sync_state()
+
+        def back(self):
+            self.page.go_back(timeout=8000)
+            self._sync_state()
+
+        def forward(self):
+            self.page.go_forward(timeout=8000)
+            self._sync_state()
+
+        def reload(self):
+            self.page.reload(wait_until="domcontentloaded", timeout=15000)
+            self._sync_state()
+
+        # ── Медиа ─────────────────────────────────────────────────────────
+
+        def force_play(self):
+            """Все методы подряд: JS → селекторы → клавиши."""
+            # 1. Прямой JS на video-элемент
+            try:
+                self.page.evaluate(
+                    "var v=document.querySelector('video');"
+                    "if(v&&v.paused)v.play();"
+                )
+            except Exception:
+                pass
+            time.sleep(0.4)
+            # 2. Кнопки play по распространённым селекторам
+            for sel in [
+                'button[aria-label*="play" i]',
+                'button[title*="play" i]',
+                '[data-testid*="play-button" i]',
+                '[class*="PlayButton"]',
+                '[class*="play-btn"]',
+                '.ytp-play-button',      # YouTube
+                '[aria-label="Play"]',
+            ]:
+                try:
+                    if self.page.locator(sel).count() > 0:
+                        self.page.locator(sel).first.click(timeout=1500)
+                        break
+                except Exception:
+                    pass
+            # 3. Клавиша k (YouTube/большинство видеоплееров)
+            try:
+                self.page.keyboard.press("k")
+            except Exception:
+                pass
+
+        def pause(self):
+            try:
+                self.page.evaluate(
+                    "var v=document.querySelector('video');if(v&&!v.paused)v.pause();"
+                )
+            except Exception:
+                pass
+
+        def fullscreen(self):
+            """Fullscreen: сначала видео-элемент, потом F11 на весь браузер."""
+            try:
+                self.page.evaluate(
+                    "var v=document.querySelector('video');"
+                    "if(v){var fn=v.requestFullscreen||v.webkitRequestFullscreen;"
+                    "if(fn)fn.call(v);"
+                    "else{document.documentElement.requestFullscreen();}}"
+                    "else{document.documentElement.requestFullscreen();}"
+                )
+            except Exception:
+                pass
+            time.sleep(0.3)
+            try:
+                self.page.keyboard.press("F11")
+            except Exception:
+                pass
+
+        def _try_autoplay(self):
+            """Тихо пробует включить воспроизведение после загрузки."""
+            try:
+                playing = self.page.evaluate(
+                    "var v=document.querySelector('video');v?!v.paused:false"
+                )
+                if not playing:
+                    self.page.evaluate(
+                        "var v=document.querySelector('video');if(v)v.play();"
+                    )
+            except Exception:
+                pass
+
+        # ── Взаимодействие с UI ───────────────────────────────────────────
+
+        def click(self, selector: str = None, x: int = None, y: int = None):
+            if selector:
+                self.page.locator(selector).first.click(timeout=5000)
+            elif x is not None and y is not None:
+                self.page.mouse.click(x, y)
+
+        def type_text(self, text: str, selector: str = None):
+            if selector:
+                self.page.fill(selector, text)
+            else:
+                self.page.keyboard.type(text)
+
+        def key(self, key: str):
+            self.page.keyboard.press(key)
+
+        def scroll(self, direction: str = "down", amount: int = 3):
+            key = "PageDown" if direction == "down" else "PageUp"
+            for _ in range(amount):
+                self.page.keyboard.press(key)
+                time.sleep(0.05)
+
+        def dismiss_popups(self) -> bool:
+            """Авто-закрыть cookie-баннеры, consent-диалоги, age-check."""
+            for sel in [
+                'button:has-text("Accept all")',
+                'button:has-text("Accept All")',
+                'button:has-text("Принять всё")',
+                'button:has-text("Принять")',
+                'button:has-text("Agree")',
+                'button:has-text("I Agree")',
+                'button:has-text("OK")',
+                'button:has-text("Got it")',
+                'button[id*="accept" i]',
+                'button[class*="accept" i]',
+                '#accept-all',
+                '[data-testid*="accept" i]',
+                '[aria-label*="accept" i]',
+                '.cookie-accept',
+                '.consent-accept',
+            ]:
+                try:
+                    loc = self.page.locator(sel)
+                    if loc.count() > 0:
+                        loc.first.click(timeout=1200)
+                        return True
+                except Exception:
+                    continue
+            return False
+
+        # ── Состояние и наблюдение ────────────────────────────────────────
+
+        def get_dom_state(self) -> dict:
+            """
+            Читаем всё из DOM: URL, title, video state.
+            Это основной источник правды — дешевле скриншота.
+            """
+            result = {}
+            try:
+                result["url"]     = self.page.url
+                result["title"]   = self.page.title()
+                result["playing"] = self.page.evaluate(
+                    "var v=document.querySelector('video');v?!v.paused:false"
+                )
+                result["video_url"] = self.page.evaluate(
+                    "var v=document.querySelector('video');v?(v.src||v.currentSrc):null"
+                )
+            except Exception:
+                pass
+            return result
+
+        def capture(self) -> str:
+            """
+            Скриншот страницы (vision fallback).
+            Playwright делает это нативно — не нужны внешние инструменты.
+            """
+            path = os.path.join(
+                os.environ.get("TEMP", os.path.expanduser("~")),
+                "deks_viver_capture.png"
             )
-            if url and url not in ("about:blank", "null", None):
-                _state["url"] = url
-                if url not in _state["history"]:
-                    _state["history"].append(url)
-            if title and title not in ("", "null", None):
-                _state["title"] = title
-            if isinstance(playing, bool):
-                _state["playing"] = playing
-        except Exception:
-            pass
+            try:
+                self.page.screenshot(path=path, full_page=False)
+            except Exception:
+                pass
+            return path
 
-    def _handle_command(action: str, body: dict) -> object:
+        def execute_js(self, code: str):
+            return self.page.evaluate(code)
+
+        def _sync_state(self):
+            global _state
+            try:
+                dom = self.get_dom_state()
+                if dom.get("url") and dom["url"] not in ("about:blank", ""):
+                    _state["url"] = dom["url"]
+                    if dom["url"] not in _state["history"]:
+                        _state["history"].append(dom["url"])
+                if dom.get("title"):
+                    _state["title"] = dom["title"]
+                if "playing" in dom:
+                    _state["playing"] = dom["playing"]
+            except Exception:
+                pass
+
+        def close(self):
+            try:
+                self.page.context.browser.close()
+            except Exception:
+                pass
+
+    # ── Goal execution (plan → act → observe → retry) ─────────────────────
+
+    def _execute_goal(ctrl: ViewerController, goal: str, url: str = "") -> dict:
+        """
+        Goal-based execution: агент пытается достичь цели, а не просто
+        выполнить одну команду.
+        """
         global _state
-        if _window is None:
-            return "no_window"
+        _state["last_goal"] = goal
+        goal_lower = goal.lower()
+
+        if url:
+            ctrl.open_url(url)
+
+        # Наблюдаем: что реально произошло?
+        dom = ctrl.get_dom_state()
+        _state.update({k: v for k, v in dom.items() if k in _state})
+
+        # Попытки достичь цели
+        played = dom.get("playing", False)
+        if not played:
+            ctrl.force_play()
+            time.sleep(1.0)
+            dom = ctrl.get_dom_state()
+            played = dom.get("playing", False)
+
+        if "полный экран" in goal_lower or "весь экран" in goal_lower or "fullscreen" in goal_lower:
+            ctrl.fullscreen()
+
+        ctrl._sync_state()
+        return _state
+
+    # ── Command dispatch ───────────────────────────────────────────────────
+
+    def _dispatch(action: str, body: dict, ctrl: ViewerController):
+        global _state
 
         if action == "open_url":
-            url = body.get("url", "")
-            if url:
-                _window.load_url(url)
-                _state["url"]   = url
-                _state["title"] = url
-                if url not in _state["history"]:
-                    _state["history"].append(url)
-
-        elif action == "play":
-            _window.evaluate_js(
-                "var v=document.querySelector('video');"
-                "if(v){if(v.paused)v.play();"
-                "else{v.pause();}}"  # toggle
-            )
-
-        elif action == "force_play":
-            _window.evaluate_js(
-                "var v=document.querySelector('video');if(v)v.play();"
-            )
-
-        elif action == "pause":
-            _window.evaluate_js(
-                "var v=document.querySelector('video');if(v)v.pause();"
-            )
-
-        elif action == "fullscreen":
-            # Попробуем и через pywebview и через JS
-            _state["fullscreen"] = not _state.get("fullscreen", False)
-            try:
-                _window.toggle_fullscreen()
-            except Exception:
-                pass
-            _window.evaluate_js(
-                "var v=document.querySelector('video');"
-                "if(v){var fn=v.requestFullscreen||v.webkitRequestFullscreen||v.mozRequestFullScreen;"
-                "if(fn)fn.call(v);}"
-            )
-
-        elif action == "fullscreen_page":
-            # Полностраничный fullscreen (не только видео)
-            _state["fullscreen"] = not _state.get("fullscreen", False)
-            try:
-                _window.toggle_fullscreen()
-            except Exception:
-                pass
-
-        elif action == "back":
-            _window.evaluate_js("history.back()")
-
-        elif action == "forward":
-            _window.evaluate_js("history.forward()")
-
-        elif action == "reload":
-            _window.evaluate_js("location.reload()")
-
-        elif action == "scroll_down":
-            _window.evaluate_js("window.scrollBy(0, window.innerHeight * 0.8)")
-
-        elif action == "scroll_up":
-            _window.evaluate_js("window.scrollBy(0, -window.innerHeight * 0.8)")
-
-        elif action == "execute_js":
-            code = body.get("code", "")
-            if code:
-                return _window.evaluate_js(code)
-
-        elif action == "click_selector":
-            selector = body.get("selector", "")
-            if selector:
-                _window.evaluate_js(
-                    f"var el=document.querySelector('{selector}');if(el)el.click();"
-                )
-
-        elif action == "get_state":
-            _update_state()
+            ctrl.open_url(body.get("url", ""))
             return _state
 
+        elif action == "execute_goal":
+            return _execute_goal(ctrl, body.get("goal", ""), body.get("url", ""))
+
+        elif action in ("play", "force_play"):
+            ctrl.force_play()
+
+        elif action == "pause":
+            ctrl.pause()
+
+        elif action == "fullscreen":
+            ctrl.fullscreen()
+
+        elif action == "back":
+            ctrl.back()
+
+        elif action == "forward":
+            ctrl.forward()
+
+        elif action == "reload":
+            ctrl.reload()
+
+        elif action == "scroll":
+            ctrl.scroll(body.get("direction", "down"), body.get("amount", 3))
+
+        elif action == "click":
+            ctrl.click(body.get("selector"), body.get("x"), body.get("y"))
+
+        elif action == "type":
+            ctrl.type_text(body.get("text", ""), body.get("selector"))
+
+        elif action == "key":
+            ctrl.key(body.get("key", ""))
+
+        elif action == "dismiss_popups":
+            return ctrl.dismiss_popups()
+
+        elif action == "execute_js":
+            return ctrl.execute_js(body.get("code", ""))
+
         elif action == "capture":
-            # Делаем скриншот содержимого через Canvas API
-            try:
-                b64 = _window.evaluate_js("""
-                (function() {
-                    try {
-                        var c = document.createElement('canvas');
-                        c.width = window.innerWidth;
-                        c.height = window.innerHeight;
-                        var ctx = c.getContext('2d');
-                        // Базовый скриншот через html2canvas если доступен
-                        if(window.html2canvas) {
-                            html2canvas(document.body).then(function(canvas) {
-                                window._viver_capture = canvas.toDataURL('image/png');
-                            });
-                            return 'async';
-                        }
-                        return 'no_html2canvas';
-                    } catch(e) { return 'error:' + e.message; }
-                })();
-                """)
-                return {"capture": b64}
-            except Exception as ex:
-                return {"error": str(ex)}
+            return {"path": ctrl.capture()}
+
+        elif action == "get_state":
+            ctrl._sync_state()
+            return _state
 
         elif action == "close":
-            try:
-                _window.destroy()
-            except Exception:
-                pass
+            ctrl.close()
+            return "closing"
 
         return "ok"
 
-    def _on_loaded(window):
-        _update_state()
-        # Инжектируем авто-плей
-        try:
-            window.evaluate_js(_AUTO_INJECT_JS)
-        except Exception:
-            pass
+    # ── HTTP API ───────────────────────────────────────────────────────────
 
-    class _ViverHandler(BaseHTTPRequestHandler):
-        def log_message(self, *args): pass
+    def _enqueue(action: str, body: dict, timeout: int = 15) -> object:
+        cid = str(uuid.uuid4())
+        _cmd_q.put((cid, action, body))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with _result_lck:
+                if cid in _result_map:
+                    return _result_map.pop(cid)
+            time.sleep(0.05)
+        return {"error": "timeout"}
+
+    class _Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
 
         def do_GET(self):
             if self.path == "/ping":
                 self.send_response(200); self.end_headers()
                 self.wfile.write(b"ok")
             elif self.path == "/state":
-                _update_state()
-                body = json.dumps(_state).encode()
-                self._reply(200, body)
+                result = _enqueue("get_state", {})
+                self._reply(200, json.dumps(result or _state).encode())
             else:
                 self.send_response(404); self.end_headers()
 
         def do_POST(self):
             try:
-                length = int(self.headers.get("Content-Length", 0))
-                body   = json.loads(self.rfile.read(length)) if length else {}
-                action = body.get("action", "")
-                result = _handle_command(action, body)
-                resp   = json.dumps({"ok": True, "result": result or "ok"}).encode()
-                self._reply(200, resp)
+                n    = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(n)) if n else {}
+                res  = _enqueue(body.get("action", ""), body)
+                self._reply(200, json.dumps({"ok": True, "result": res or "ok"}).encode())
             except Exception as ex:
-                err = json.dumps({"ok": False, "error": str(ex)}).encode()
-                self._reply(500, err)
+                self._reply(500, json.dumps({"ok": False, "error": str(ex)}).encode())
 
-        def _reply(self, code, data: bytes):
+        def _reply(self, code: int, data: bytes):
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
@@ -231,54 +407,95 @@ if "--runtime" in sys.argv:
             self.wfile.write(data)
 
     def _start_http():
-        server = HTTPServer(("127.0.0.1", VIVER_PORT), _ViverHandler)
-        server.serve_forever()
+        HTTPServer(("127.0.0.1", VIVER_PORT), _Handler).serve_forever()
 
     threading.Thread(target=_start_http, daemon=True).start()
 
-    _window = webview.create_window(
-        "DEKS Viver",
-        url="about:blank",
-        width=1280,
-        height=780,
-        resizable=True,
-        background_color="#0a0a0a",
-    )
-    _window.events.loaded += _on_loaded
-    webview.start(debug=False)
+    # ── Playwright main loop (ЕДИНСТВЕННЫЙ поток Playwright) ───────────────
+    with sync_playwright() as pw:
+        # Реальный Chrome для DRM (Netflix и т.д.)
+        try:
+            browser = pw.chromium.launch(
+                headless=False,
+                channel="chrome",
+                args=["--start-maximized", "--disable-blink-features=AutomationControlled"],
+            )
+        except Exception:
+            # Fallback: скачанный Chromium
+            browser = pw.chromium.launch(
+                headless=False,
+                args=["--start-maximized"],
+            )
+
+        ctx  = browser.new_context(
+            viewport=None,
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+        )
+        page = ctx.new_page()
+        page.set_extra_http_headers({"Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8"})
+        ctrl = ViewerController(page)
+
+        # Основной цикл обработки команд
+        running = True
+        while running:
+            try:
+                cid, action, body = _cmd_q.get(timeout=0.15)
+            except queue.Empty:
+                if not browser.is_connected():
+                    break
+                continue
+
+            try:
+                result = _dispatch(action, body, ctrl)
+            except Exception as ex:
+                print(f"[VIVER RUNTIME] Error in {action}: {ex}")
+                result = {"error": str(ex)}
+
+            with _result_lck:
+                _result_map[cid] = result
+
+            if action == "close" or result == "closing":
+                running = False
+
+        try:
+            browser.close()
+        except Exception:
+            pass
+
     sys.exit(0)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SKILL MODE — импортируется в DEKS
+#  SKILL MODE — импортируется DEKS
 # ══════════════════════════════════════════════════════════════════════════════
 
 from skills.base_skill import BaseSkill
 
 _TRIGGERS_PLAY = [
-    "плей", "нажми плей", "нажми play", "запусти видео",
-    "включи видео", "воспроизвести", "воспроизведи",
+    "плей", "нажми плей", "запусти видео", "включи видео",
+    "воспроизвести", "воспроизведи", "play",
 ]
 _TRIGGERS_PAUSE = [
-    "пауза", "поставь на паузу", "останови видео", "стоп видео",
+    "пауза", "поставь на паузу", "останови видео",
 ]
 _TRIGGERS_FULLSCREEN = [
     "полный экран", "на весь экран", "разверни на весь", "fullscreen",
     "развернуть", "разверни экран",
 ]
-_TRIGGERS_BACK = [
-    "назад в вивере", "вернись в вивере", "предыдущая страница",
-    "вернись назад",
-]
+_TRIGGERS_BACK    = ["назад в вивере", "вернись в вивере", "предыдущая страница"]
 _TRIGGERS_FORWARD = ["вперёд в вивере", "вперед в вивере"]
-_TRIGGERS_WRONG = [
+_TRIGGERS_WRONG   = [
     "ты открыл не то", "открыл не то", "не тот фильм", "не та страница",
     "не то видео", "неправильно открыл", "что сейчас открыто",
-    "что в вивере", "что ты сейчас показываешь", "что открыто",
-    "не тот сайт", "не та музыка", "не та песня",
+    "что в вивере", "что ты сейчас показываешь", "не тот сайт",
+    "не та музыка", "не та песня", "что открыто",
 ]
 _TRIGGERS_CLOSE = [
-    "закрой вивер", "закрой интерактивное", "выключи вивер", "убери вивер",
+    "закрой вивер", "выключи вивер", "убери вивер",
 ]
 
 _ALL_TRIGGERS = (
@@ -293,10 +510,10 @@ class DeksViverSkill(BaseSkill):
         global _viver_skill_instance
         super().__init__(app, name)
         self._proc = None
-        _viver_skill_instance = self   # регистрируем синглтон
+        _viver_skill_instance = self
         print("[VIVER] Skill loaded — all web content will open in DEKS Viver")
 
-    # ── Основной обработчик ───────────────────────────────────────────────
+    # ── Обработчик голосовых команд ───────────────────────────────────────
 
     def handle(self, command: str) -> str | None:
         cmd = command.lower().strip()
@@ -346,9 +563,18 @@ class DeksViverSkill(BaseSkill):
     # ── Запуск процесса ───────────────────────────────────────────────────
 
     def _launch(self) -> bool:
-        """Запустить viver если не запущен. Возвращает True если успешно."""
         if self.is_alive():
             return True
+
+        # Гарантируем что playwright браузеры установлены
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                capture_output=True, timeout=120,
+            )
+        except Exception:
+            pass
+
         script = os.path.abspath(__file__)
         try:
             self._proc = subprocess.Popen(
@@ -356,14 +582,15 @@ class DeksViverSkill(BaseSkill):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-        except Exception as e:
-            print(f"[VIVER] Launch error: {e}")
+        except Exception as ex:
+            print(f"[VIVER] Launch failed: {ex}")
             return False
 
-        for _ in range(35):      # ждём до 7 сек
+        for _ in range(40):   # ждём до 8 сек
             if self.is_alive():
                 return True
             time.sleep(0.2)
+
         return False
 
     # ── HTTP-команды ──────────────────────────────────────────────────────
@@ -377,17 +604,16 @@ class DeksViverSkill(BaseSkill):
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=3) as r:
+            with urllib.request.urlopen(req, timeout=15) as r:
                 return json.loads(r.read().decode())
-        except Exception:
+        except Exception as ex:
+            print(f"[VIVER] Send error ({action}): {ex}")
             return None
 
     def get_state(self) -> dict:
-        """Текущее состояние вивера: URL, title, playing, fullscreen."""
         try:
-            self._send("get_state")
             req = urllib.request.Request(f"{VIVER_URL}/state", method="GET")
-            with urllib.request.urlopen(req, timeout=2) as r:
+            with urllib.request.urlopen(req, timeout=5) as r:
                 return json.loads(r.read().decode())
         except Exception:
             return {}
@@ -401,49 +627,21 @@ class DeksViverSkill(BaseSkill):
             return False
 
     def open_url(self, url: str) -> bool:
-        """Открыть URL в вивере (вызывается из try_open_in_viver)."""
         result = self._send("open_url", url=url)
         return result is not None
 
     def capture(self) -> str | None:
-        """
-        Сделать скриншот вивера для анализа.
-        Возвращает путь к PNG-файлу.
-        """
-        try:
-            import mss
-            import mss.tools
-            # Найти окно по заголовку через ctypes (Windows)
-            import ctypes
-            user32 = ctypes.windll.user32
-            hwnd = user32.FindWindowW(None, "DEKS Viver")
-            if hwnd:
-                rect = ctypes.wintypes.RECT()
-                user32.GetWindowRect(hwnd, ctypes.byref(rect))
-                x, y = rect.left, rect.top
-                w = rect.right  - rect.left
-                h = rect.bottom - rect.top
-                with mss.mss() as sct:
-                    region = {"left": x, "top": y, "width": w, "height": h}
-                    img    = sct.grab(region)
-                    path   = os.path.join(
-                        os.environ.get("TEMP", os.path.expanduser("~")),
-                        "deks_viver_capture.png"
-                    )
-                    mss.tools.to_png(img.rgb, img.size, output=path)
-                    return path
-        except Exception as e:
-            print(f"[VIVER] Capture error: {e}")
+        """Скриншот текущего состояния вивера для vision."""
+        result = self._send("capture")
+        if result and isinstance(result.get("result"), dict):
+            return result["result"].get("path")
         return None
 
     # ── Коррекция ошибки ──────────────────────────────────────────────────
 
     def _handle_wrong(self):
-        """'Ты открыл не то' — смотрим что в вивере → сообщаем → ждём уточнения."""
         if not self.is_alive():
-            self.app.after(0, lambda: self.app.deks_say(
-                "Viver не открыт. Скажи что нужно."
-            ))
+            self.app.after(0, lambda: self.app.deks_say("Viver не открыт. Скажи что нужно."))
             return
 
         state  = self.get_state()
@@ -451,29 +649,27 @@ class DeksViverSkill(BaseSkill):
         url    = state.get("url",   "")
         shown  = title if (title and title != url) else url
 
-        if shown:
-            msg = f"Сейчас открыто: {shown}. Что показать вместо этого?"
-        else:
-            msg = "Viver пустой. Что нужно открыть?"
-
+        msg = (
+            f"Сейчас открыто: {shown}. Что показать вместо этого?"
+            if shown else
+            "Viver пустой. Что нужно открыть?"
+        )
         self.app.after(0, lambda m=msg: self.app.deks_say(m))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Публичная функция для ollama_mixin / llm_runtime_patch / commands.py
+#  Публичный хелпер — вызывается из ollama_mixin / commands.py
 # ══════════════════════════════════════════════════════════════════════════════
 
 def try_open_in_viver(url: str) -> bool:
     """
-    Если скилл установлен — открывает URL в вивере.
-    Авто-запускает вивер если он не запущен.
-    Возвращает True при успехе, False если скилл не активен.
+    Если скилл загружен — открывает URL в Viver (авто-запуск при необходимости).
+    Возвращает True при успехе, False если скилл не установлен.
     """
     global _viver_skill_instance
     if _viver_skill_instance is None:
-        return False   # скилл не загружен
+        return False
 
-    # Авто-запуск если вивер не работает
     if not _viver_skill_instance.is_alive():
         launched = _viver_skill_instance._launch()
         if not launched:
