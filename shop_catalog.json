@@ -5,7 +5,11 @@
     "description": "Навык зрения для DEKS. Скажи «что на экране?» — DEKS сделает скриншот и расскажет что видит. Поддерживает уточнения. Работает локально — API ключи не нужны.",
     "version": "2.0",
     "author": "DEKS",
-    "preview_commands": ["что на экране", "что ты видишь", "посмотри на экран"],
+    "preview_commands": [
+      "что на экране",
+      "что ты видишь",
+      "посмотри на экран"
+    ],
     "file": "eyes.py",
     "download_url": "https://raw.githubusercontent.com/vladislavkutsaev1993-gif/deks-skills-store/main/skills/eyes.py",
     "pip_requirements": ["mss", "Pillow"],
@@ -17,6 +21,41 @@
       "eyes_clarify": {
         "label": "Уточнить что на экране",
         "triggers": ["не то","не это","вон то","а то что","а вот то","нет вон","левее","правее","сверху","снизу","в углу","по центру"]
+      }
+    }
+  },
+  {
+    "id": "deks_viewer",
+    "name": "🖥 DEKS Viewer [медиа-окно]",
+    "description": "Медиа-окно для DEKS. Открывает сайты, YouTube и картинки прямо в DEKS без браузера. Управляется голосом: «открой ютуб», «закрой вивер», «на весь экран».",
+    "version": "1.0",
+    "author": "DEKS",
+    "preview_commands": [
+      "открой ютуб",
+      "закрой вивер",
+      "на весь экран"
+    ],
+    "package": true,
+    "package_url": "https://raw.githubusercontent.com/vladislavkutsaev1993-gif/deks-skills-store/main/skills/deks_viewer/",
+    "files": [
+      "__init__.py",
+      "server.py",
+      "viewer.html"
+    ],
+    "install_dir": "viewer",
+    "pip_requirements": ["pywebview"],
+    "triggers": {
+      "viewer_close": {
+        "label": "Закрыть DEKS Viewer",
+        "triggers": ["закрой вивер","закрой viewer","выключи вивер"]
+      },
+      "viewer_fullscreen": {
+        "label": "Полный экран",
+        "triggers": ["на весь экран","полный экран","развернуть вивер"]
+      },
+      "viewer_hide": {
+        "label": "Скрыть Viewer",
+        "triggers": ["скрой вивер","убери вивер"]
       }
     }
   }

@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DEKS Viewer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0d0d0d;
+    color: #e0e0e0;
+    font-family: 'Segoe UI', sans-serif;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* ── Idle / loading ── */
+  #idle {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    opacity: 0.35;
+    user-select: none;
+  }
+  #idle svg { width: 64px; height: 64px; }
+  #idle span { font-size: 15px; letter-spacing: 2px; text-transform: uppercase; }
+
+  /* ── Blocks ── */
+  .block { display: none; width: 100%; height: 100%; }
+  .block.active { display: flex; align-items: center; justify-content: center; }
+
+  /* Image */
+  #image-block img {
+    max-width: 100%;
+    max-height: 100vh;
+    object-fit: contain;
+    border-radius: 6px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.7);
+    animation: fadeIn 0.3s ease;
+  }
+
+  /* Web */
+  #web-block iframe {
+    width: 100vw;
+    height: 100vh;
+    border: none;
+    animation: fadeIn 0.3s ease;
+  }
+
+  /* Video */
+  #video-block {
+    background: #000;
+  }
+  #video-block iframe {
+    width: 100%;
+    height: 100%;
+    border: none;
+  }
+
+  /* Text */
+  #text-block {
+    padding: 40px;
+    align-items: flex-start;
+    overflow-y: auto;
+  }
+  #text-content {
+    font-size: 16px;
+    line-height: 1.7;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-width: 860px;
+    animation: fadeIn 0.3s ease;
+  }
+
+  /* Toast */
+  #toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(60px);
+    background: rgba(255,255,255,0.1);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 20px;
+    padding: 8px 20px;
+    font-size: 13px;
+    color: #ccc;
+    transition: transform 0.3s ease, opacity 0.3s ease;
+    opacity: 0;
+    pointer-events: none;
+    z-index: 999;
+  }
+  #toast.show {
+    transform: translateX(-50%) translateY(0);
+    opacity: 1;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: scale(0.97); }
+    to   { opacity: 1; transform: scale(1); }
+  }
+</style>
+</head>
+<body>
+
+<!-- Idle screen -->
+<div id="idle">
+  <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect width="64" height="64" rx="16" fill="#1a1a1a"/>
+    <circle cx="32" cy="32" r="14" stroke="#444" stroke-width="2"/>
+    <circle cx="32" cy="32" r="5" fill="#444"/>
+  </svg>
+  <span>DEKS Viewer</span>
+</div>
+
+<!-- Image block -->
+<div class="block" id="image-block">
+  <img id="img-el" src="" alt="" />
+</div>
+
+<!-- Web block -->
+<div class="block" id="web-block">
+  <iframe id="web-frame" src="" allow="autoplay; fullscreen; encrypted-media; picture-in-picture"></iframe>
+</div>
+
+<!-- Video block -->
+<div class="block" id="video-block">
+  <iframe id="video-frame" src=""
+    allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+    allowfullscreen></iframe>
+</div>
+
+<!-- Text block -->
+<div class="block" id="text-block">
+  <pre id="text-content"></pre>
+</div>
+
+<!-- Toast notification -->
+<div id="toast"></div>
+
+<script>
+  var _toastTimer = null;
+
+  function _hideAll() {
+    document.getElementById('idle').style.display = 'none';
+    ['image-block','web-block','video-block','text-block'].forEach(function(id) {
+      var el = document.getElementById(id);
+      el.classList.remove('active');
+    });
+  }
+
+  function showIdle() {
+    _hideAll();
+    document.getElementById('idle').style.display = 'flex';
+    // Stop iframes to free resources
+    document.getElementById('web-frame').src = '';
+    document.getElementById('video-frame').src = '';
+    document.getElementById('img-el').src = '';
+  }
+
+  function showImage(url) {
+    _hideAll();
+    document.getElementById('img-el').src = url;
+    document.getElementById('image-block').classList.add('active');
+    toast('Изображение');
+  }
+
+  function showWeb(url) {
+    _hideAll();
+    document.getElementById('web-frame').src = url;
+    document.getElementById('web-block').classList.add('active');
+    toast('Открываю сайт...');
+  }
+
+  function showVideo(embedUrl) {
+    _hideAll();
+    document.getElementById('video-frame').src = embedUrl;
+    document.getElementById('video-block').classList.add('active');
+    toast('Видео');
+  }
+
+  function showText(text) {
+    _hideAll();
+    document.getElementById('text-content').textContent = text;
+    document.getElementById('text-block').classList.add('active');
+  }
+
+  function toast(msg) {
+    var el = document.getElementById('toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    if (_toastTimer) clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(function() {
+      el.classList.remove('show');
+    }, 2500);
+  }
+
+  // Initial state
+  showIdle();
+</script>
+</body>
+</html>
