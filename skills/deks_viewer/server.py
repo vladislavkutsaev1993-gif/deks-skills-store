@@ -162,18 +162,45 @@ def _process_commands():
             js = f"""
 (function() {{
     var needle = {json.dumps(text)};
-    var candidates = document.querySelectorAll(
-        'a, button, [role="button"], [role="link"], [onclick], h1, h2, h3, h4, li, span, div, p'
-    );
-    for (var i = 0; i < candidates.length; i++) {{
-        var el = candidates[i];
-        if (el.offsetParent === null) continue;
-        var content = (el.textContent || el.innerText || '').toLowerCase().trim();
-        if (content.includes(needle)) {{
-            el.click();
+
+    function norm(s) {{
+        return (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+    }}
+
+    function fireClick(el) {{
+        el.dispatchEvent(new MouseEvent('mouseover', {{bubbles: true}}));
+        el.dispatchEvent(new MouseEvent('mousedown', {{bubbles: true, cancelable: true}}));
+        el.dispatchEvent(new MouseEvent('mouseup',   {{bubbles: true, cancelable: true}}));
+        el.dispatchEvent(new MouseEvent('click',     {{bubbles: true, cancelable: true, view: window}}));
+        if (el.tagName === 'A' && el.href) {{
+            window.location.href = el.href;
+        }}
+    }}
+
+    // Проход 1 — ссылки и кнопки (самое надёжное)
+    var links = Array.from(document.querySelectorAll('a[href], button'));
+    for (var el of links) {{
+        if (!el.offsetParent) continue;
+        if (norm(el.textContent).includes(needle)) {{
+            fireClick(el);
             return true;
         }}
     }}
+
+    // Проход 2 — любой видимый элемент с подходящим текстом
+    var all = Array.from(document.querySelectorAll('*'));
+    for (var el of all) {{
+        if (!el.offsetParent) continue;
+        var tag = el.tagName;
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'HTML' || tag === 'BODY' || tag === 'HEAD') continue;
+        var txt = norm(el.textContent);
+        if (txt.includes(needle) && txt.length < needle.length * 15) {{
+            var target = el.closest('a[href]') || el;
+            fireClick(target);
+            return true;
+        }}
+    }}
+
     return false;
 }})()
 """
