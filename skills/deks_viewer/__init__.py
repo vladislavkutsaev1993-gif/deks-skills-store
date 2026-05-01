@@ -151,5 +151,25 @@ def close() -> bool:
     return True
 
 
+def click_text(text: str) -> bool:
+    """Найти элемент по тексту и кликнуть по нему."""
+    return _send("click_text", text=text)
+
+
+def scroll(direction: str = "down", amount: int = 500) -> bool:
+    """Прокрутить страницу вверх или вниз."""
+    return _send("scroll", direction=direction, amount=amount)
+
+
+def back() -> bool:
+    """Назад в истории браузера."""
+    return _send("back")
+
+
+def forward() -> bool:
+    """Вперёд в истории браузера."""
+    return _send("forward")
+
+
 def is_running() -> bool:
     return _is_running()

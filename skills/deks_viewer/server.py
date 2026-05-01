@@ -157,6 +157,41 @@ def _process_commands():
         elif action == "show":
             _window.show()
 
+        elif action == "click_text":
+            text = body.get("text", "").lower()
+            js = f"""
+(function() {{
+    var needle = {json.dumps(text)};
+    var candidates = document.querySelectorAll(
+        'a, button, [role="button"], [role="link"], [onclick], h1, h2, h3, h4, li, span, div, p'
+    );
+    for (var i = 0; i < candidates.length; i++) {{
+        var el = candidates[i];
+        if (el.offsetParent === null) continue;
+        var content = (el.textContent || el.innerText || '').toLowerCase().trim();
+        if (content.includes(needle)) {{
+            el.click();
+            return true;
+        }}
+    }}
+    return false;
+}})()
+"""
+            _window.evaluate_js(js)
+
+        elif action == "scroll":
+            direction = body.get("direction", "down")
+            amount = int(body.get("amount", 500))
+            if direction == "up":
+                amount = -amount
+            _window.evaluate_js(f"window.scrollBy({{top: {amount}, behavior: 'smooth'}})")
+
+        elif action == "back":
+            _window.evaluate_js("window.history.back()")
+
+        elif action == "forward":
+            _window.evaluate_js("window.history.forward()")
+
         elif action == "close":
             _window.destroy()
 
